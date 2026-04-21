@@ -1,0 +1,94 @@
+.pdfjs-wrapper {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    background: #2a2a2a;
+    color: #e5e4e7;
+}
+
+.pdfjs-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: #1f1f1f;
+    border-bottom: 1px solid #333;
+    font-size: 13px;
+    z-index: 1;
+}
+
+.pdfjs-toolbar button {
+    background: #333;
+    color: #fff;
+    border: 1px solid #555;
+    border-radius: 4px;
+    padding: 4px 10px;
+    cursor: pointer;
+    font: inherit;
+}
+
+.pdfjs-toolbar button:hover {
+    background: #444;
+}
+
+.pdfjs-toolbar .hint {
+    margin-left: auto;
+    opacity: 0.6;
+    font-size: 12px;
+}
+
+.pdfjs-canvas-scroll {
+    flex: 1;
+    overflow: hidden;
+    position: relative;
+    cursor: grab;
+    user-select: none;
+    touch-action: none;
+}
+
+.pdfjs-canvas-scroll:active {
+    cursor: grabbing;
+}
+
+.pdfjs-stage {
+    position: absolute;
+    top: 20px;
+    left: 20px;
+    transform-origin: 0 0;
+    will-change: transform;
+}
+
+.pdfjs-page {
+    position: relative;
+    background: #fff;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+}
+
+.pdfjs-canvas {
+    display: block;
+}
+
+.pdfjs-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    pointer-events: none;
+}
+
+.pdfjs-loading,
+.pdfjs-error {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    color: #fff;
+    background: rgba(0, 0, 0, 0.6);
+    padding: 8px 16px;
+    border-radius: 6px;
+    font-size: 14px;
+}
+
+.pdfjs-error {
+    background: rgba(180, 40, 40, 0.85);
+}

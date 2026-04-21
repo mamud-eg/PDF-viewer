@@ -1,0 +1,13 @@
+.reactpdf-wrapper {
+    position: absolute;
+    inset: 0;
+    background: #2a2a2a;
+}
+
+.reactpdf-wrapper .rpv-core__viewer {
+    height: 100%;
+}
+
+.reactpdf-overlay {
+    overflow: visible;
+}
