@@ -10,4 +10,13 @@
 
 .reactpdf-overlay {
     overflow: visible;
+    pointer-events: all;
+}
+
+.reactpdf-mark {
+    cursor: grab;
+}
+
+.reactpdf-mark.dragging {
+    cursor: grabbing;
 }
