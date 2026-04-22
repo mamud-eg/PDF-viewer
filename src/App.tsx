@@ -1,7 +1,6 @@
 import { useState } from "react"
 import { PdfJsCanvasViewer } from "./prototypes/PdfJsCanvasViewer/PdfJsCanvasViewer"
 import { ReactPdfViewer } from "./prototypes/ReactPdfViewer/ReactPdfViewer"
-import { MOCK_MARKS } from "./mockMarks"
 import "./App.css"
 
 const PDF_URL = "/sample.pdf"
@@ -32,12 +31,8 @@ export default function App() {
             </div>
 
             <div className="viewer-container">
-                {activeTab === "pdfjs" && (
-                    <PdfJsCanvasViewer pdfUrl={PDF_URL} marks={MOCK_MARKS} />
-                )}
-                {activeTab === "reactpdf" && (
-                    <ReactPdfViewer pdfUrl={PDF_URL} marks={MOCK_MARKS} />
-                )}
+                {activeTab === "pdfjs" && <PdfJsCanvasViewer pdfUrl={PDF_URL} />}
+                {activeTab === "reactpdf" && <ReactPdfViewer pdfUrl={PDF_URL} />}
             </div>
         </div>
     )
