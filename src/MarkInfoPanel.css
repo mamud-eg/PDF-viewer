@@ -1,0 +1,62 @@
+.mark-info-panel {
+    position: absolute;
+    z-index: 10;
+    min-width: 120px;
+    padding: 8px 10px;
+    background: #1f1f1f;
+    color: #f5f5f5;
+    border-radius: 6px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+    font-size: 12px;
+    line-height: 1.4;
+    pointer-events: all;
+    user-select: none;
+}
+
+.mark-info-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 6px;
+}
+
+.mark-info-swatch {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    border: 1px solid #111;
+}
+
+.mark-info-title {
+    flex: 1;
+    font-weight: 600;
+}
+
+.mark-info-close {
+    background: transparent;
+    border: none;
+    color: #f5f5f5;
+    cursor: pointer;
+    font-size: 16px;
+    line-height: 1;
+    padding: 0 4px;
+}
+
+.mark-info-close:hover {
+    color: #ff6b6b;
+}
+
+.mark-info-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.mark-info-key {
+    color: #9aa0a6;
+}
+
+.mark-info-val {
+    font-variant-numeric: tabular-nums;
+}
