@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import * as pdfjsLib from "pdfjs-dist"
 import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from "pdfjs-dist"
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.js?url"
@@ -15,7 +15,8 @@ interface Props {
 const MIN_SCALE = 0.5
 const MAX_SCALE = 5
 const DRAG_THRESHOLD = 3
-const PAN_THRESHOLD = 5
+// Must match the `margin` on `.pdfjs-page` in PdfJsCanvasViewer.css — used in zoom-anchor math.
+const PAGE_MARGIN = 20
 
 export function PdfJsCanvasViewer({ pdfUrl }: Props) {
     const canvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -25,7 +26,6 @@ export function PdfJsCanvasViewer({ pdfUrl }: Props) {
 
     const [native, setNative] = useState<{ width: number; height: number } | null>(null)
     const [scale, setScale] = useState(1.5)
-    const [offset, setOffset] = useState({ x: 0, y: 0 })
     const [rendered, setRendered] = useState<{ width: number; height: number } | null>(null)
     const [error, setError] = useState<string | null>(null)
 
@@ -102,17 +102,51 @@ export function PdfJsCanvasViewer({ pdfUrl }: Props) {
         }
     }, [scale, native])
 
-    // Mouse-wheel zoom — attach natively so we can preventDefault (React's onWheel is passive)
+    // Zoom-anchor: captured on ctrl+wheel; applied after the canvas re-renders at the new scale
+    // so the PDF point under the cursor stays put.
+    const zoomAnchorRef = useRef<{
+        oldScale: number
+        cursorX: number
+        cursorY: number
+        scrollLeft: number
+        scrollTop: number
+    } | null>(null)
+
+    useLayoutEffect(() => {
+        const anchor = zoomAnchorRef.current
+        const el = scrollRef.current
+        if (!anchor || !el || !rendered) return
+        const factor = scale / anchor.oldScale
+        el.scrollLeft =
+            (anchor.cursorX + anchor.scrollLeft - PAGE_MARGIN) * factor + PAGE_MARGIN - anchor.cursorX
+        el.scrollTop =
+            (anchor.cursorY + anchor.scrollTop - PAGE_MARGIN) * factor + PAGE_MARGIN - anchor.cursorY
+        zoomAnchorRef.current = null
+    }, [rendered, scale])
+
+    // Ctrl/Cmd + wheel = zoom (anchored at cursor). Plain wheel = browser-native scroll.
     useEffect(() => {
         const el = scrollRef.current
         if (!el) return
 
         function onWheel(e: WheelEvent) {
-            if (!e.ctrlKey && !e.metaKey && Math.abs(e.deltaY) < 2) return
+            if (!e.ctrlKey && !e.metaKey) return
             e.preventDefault()
+            const rect = el!.getBoundingClientRect()
+            const cursorX = e.clientX - rect.left
+            const cursorY = e.clientY - rect.top
             setScale((s) => {
                 const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1
-                return Math.min(MAX_SCALE, Math.max(MIN_SCALE, s * factor))
+                const newScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, s * factor))
+                if (newScale === s) return s
+                zoomAnchorRef.current = {
+                    oldScale: s,
+                    cursorX,
+                    cursorY,
+                    scrollLeft: el!.scrollLeft,
+                    scrollTop: el!.scrollTop,
+                }
+                return newScale
             })
         }
 
@@ -120,25 +154,57 @@ export function PdfJsCanvasViewer({ pdfUrl }: Props) {
         return () => el.removeEventListener("wheel", onWheel)
     }, [])
 
+    // Right-click drag = pan (adjusts the real scroll container, so scrollbars stay in sync).
+    useEffect(() => {
+        const el = scrollRef.current
+        if (!el) return
+
+        let pan: { startX: number; startY: number; scrollLeft: number; scrollTop: number } | null = null
+
+        function onMouseDown(e: MouseEvent) {
+            if (e.button !== 2) return
+            e.preventDefault()
+            pan = {
+                startX: e.clientX,
+                startY: e.clientY,
+                scrollLeft: el!.scrollLeft,
+                scrollTop: el!.scrollTop,
+            }
+            el!.classList.add("panning")
+        }
+        function onMouseMove(e: MouseEvent) {
+            if (!pan) return
+            e.preventDefault()
+            el!.scrollLeft = pan.scrollLeft - (e.clientX - pan.startX)
+            el!.scrollTop = pan.scrollTop - (e.clientY - pan.startY)
+        }
+        function onMouseUp(e: MouseEvent) {
+            if (!pan || e.button !== 2) return
+            pan = null
+            el!.classList.remove("panning")
+        }
+        function onContextMenu(e: MouseEvent) {
+            e.preventDefault()
+        }
+
+        el.addEventListener("mousedown", onMouseDown)
+        el.addEventListener("contextmenu", onContextMenu)
+        window.addEventListener("mousemove", onMouseMove)
+        window.addEventListener("mouseup", onMouseUp)
+        return () => {
+            el.removeEventListener("mousedown", onMouseDown)
+            el.removeEventListener("contextmenu", onContextMenu)
+            window.removeEventListener("mousemove", onMouseMove)
+            window.removeEventListener("mouseup", onMouseUp)
+        }
+    }, [])
+
     const canvasW = rendered?.width ?? 0
     const canvasH = rendered?.height ?? 0
     const scaleX = native && canvasW ? canvasW / native.width : 1
     const scaleY = native && canvasH ? canvasH / native.height : 1
 
-    // Pan (scroll container) — only when not dragging a mark
-    const panRef = useRef<{
-        startX: number
-        startY: number
-        baseX: number
-        baseY: number
-        moved: boolean
-    } | null>(null)
-
-    // Flag read by the SVG onClick to suppress placement after a pan.
-    // Cleared at the start of the next pointerdown so it survives the pointerup→click flow.
-    const panDidMoveRef = useRef(false)
-
-    // Mark drag state
+    // Mark drag state (left-click only; right-click is reserved for panning)
     const markDragRef = useRef<{
         id: string
         startOffsetX: number
@@ -146,41 +212,6 @@ export function PdfJsCanvasViewer({ pdfUrl }: Props) {
         moved: boolean
     } | null>(null)
     const [draggingMarkId, setDraggingMarkId] = useState<string | null>(null)
-
-    function handlePointerDown(e: React.PointerEvent<HTMLDivElement>) {
-        if (markDragRef.current) return
-        // If pointerdown originated on the SVG overlay (empty area or mark),
-        // let the SVG/mark handlers own this interaction — don't start a pan.
-        const target = e.target as Element | null
-        if (target && (target.tagName === "svg" || target.closest(".pdfjs-overlay"))) {
-            return
-        }
-        panDidMoveRef.current = false
-        ;(e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId)
-        panRef.current = {
-            startX: e.clientX,
-            startY: e.clientY,
-            baseX: offset.x,
-            baseY: offset.y,
-            moved: false,
-        }
-    }
-    function handlePointerMove(e: React.PointerEvent<HTMLDivElement>) {
-        if (!panRef.current) return
-        const dx = e.clientX - panRef.current.startX
-        const dy = e.clientY - panRef.current.startY
-        if (!panRef.current.moved && dx * dx + dy * dy > PAN_THRESHOLD * PAN_THRESHOLD) {
-            panRef.current.moved = true
-        }
-        setOffset({ x: panRef.current.baseX + dx, y: panRef.current.baseY + dy })
-    }
-    function handlePointerUp(e: React.PointerEvent<HTMLDivElement>) {
-        ;(e.currentTarget as HTMLDivElement).releasePointerCapture(e.pointerId)
-        if (panRef.current?.moved) {
-            panDidMoveRef.current = true
-        }
-        panRef.current = null
-    }
 
     function nativeFromSvgEvent(e: React.PointerEvent<SVGElement> | React.MouseEvent<SVGElement>) {
         const svg = e.currentTarget.ownerSVGElement ?? (e.currentTarget as SVGSVGElement)
@@ -191,6 +222,7 @@ export function PdfJsCanvasViewer({ pdfUrl }: Props) {
     }
 
     function handleMarkPointerDown(e: React.PointerEvent<SVGGElement>, id: string) {
+        if (e.button !== 0) return
         e.stopPropagation()
         const target = e.currentTarget
         target.setPointerCapture(e.pointerId)
@@ -229,28 +261,9 @@ export function PdfJsCanvasViewer({ pdfUrl }: Props) {
         }
     }
 
-    function handleSvgPointerUp(e: React.PointerEvent<SVGSVGElement>) {
-        // Suppress if this is the tail of a pan or mark drag
-        if (panDidMoveRef.current) return
-        // If a mark drag just finished, markDragRef was cleared in handleMarkPointerUp
-        // but we need another ref to track if *any* mark was dragged this interaction
-        const didDragMark = draggingMarkId !== null
-        // If something is selected, first click on empty area just deselects
-        if (selectedId !== null) {
-            selectMark(null)
-            return
-        }
-        // Only place if we didn't just drag a mark
-        if (!didDragMark) {
-            const { nativeX, nativeY } = nativeFromSvgEvent(e)
-            addMark(nativeX, nativeY)
-        }
-    }
-
     function handleSvgClick(e: React.MouseEvent<SVGSVGElement>) {
-        // Fallback for browsers/scenarios where click fires despite mark drag.
-        // Mark <g> elements have onClick stopPropagation so this only fires on empty area.
-        if (panDidMoveRef.current) return
+        // Left-click only: right-click is handled by the pan logic on the scroll container.
+        if (e.button !== 0) return
         const didDragMark = draggingMarkId !== null
         if (selectedId !== null) {
             selectMark(null)
@@ -270,100 +283,82 @@ export function PdfJsCanvasViewer({ pdfUrl }: Props) {
                 <button onClick={() => setScale((s) => Math.max(MIN_SCALE, s / 1.25))}>−</button>
                 <span>{Math.round(scale * 100)}%</span>
                 <button onClick={() => setScale((s) => Math.min(MAX_SCALE, s * 1.25))}>+</button>
-                <button
-                    onClick={() => {
-                        setScale(1.5)
-                        setOffset({ x: 0, y: 0 })
-                    }}
-                >
-                    Reset
-                </button>
-                <span className="hint">Click = place · drag mark = move · click mark = select · scroll = zoom</span>
+                <button onClick={() => setScale(1.5)}>Reset</button>
+                <span className="hint">
+                    Left-click = place / select · drag mark = move · right-click drag = pan · ctrl+scroll = zoom
+                </span>
             </div>
 
-            <div
-                ref={scrollRef}
-                className="pdfjs-canvas-scroll"
-                onPointerDown={handlePointerDown}
-                onPointerMove={handlePointerMove}
-                onPointerUp={handlePointerUp}
-                onPointerCancel={handlePointerUp}
-            >
-                <div
-                    className="pdfjs-stage"
-                    style={{ transform: `translate(${offset.x}px, ${offset.y}px)` }}
-                >
-                    <div className="pdfjs-page" style={{ width: canvasW, height: canvasH }}>
-                        <canvas ref={canvasRef} className="pdfjs-canvas" />
-                        {native && rendered && (
-                            <svg
-                                className="pdfjs-overlay"
-                                width={canvasW}
-                                height={canvasH}
-                                viewBox={`0 0 ${canvasW} ${canvasH}`}
-                                onPointerUp={handleSvgPointerUp}
-                                onClick={handleSvgClick}
-                            >
-                                {marks.map((mark) => {
-                                    const screenX = mark.x * scaleX
-                                    const screenY = mark.y * scaleY
-                                    const isSelected = mark.id === selectedId
-                                    const dim = selectedId !== null && !isSelected
-                                    const isDragging = draggingMarkId === mark.id
-                                    return (
-                                        <g
-                                            key={mark.id}
-                                            className={`pdfjs-mark${isDragging ? " dragging" : ""}`}
-                                            opacity={dim ? 0.35 : 1}
-                                            onPointerDown={(e) => handleMarkPointerDown(e, mark.id)}
-                                            onPointerMove={handleMarkPointerMove}
-                                            onPointerUp={handleMarkPointerUp}
-                                            onPointerCancel={handleMarkPointerUp}
-                                            onClick={(e) => e.stopPropagation()}
-                                        >
-                                            {isSelected && (
-                                                <circle
-                                                    cx={screenX}
-                                                    cy={screenY}
-                                                    r={12}
-                                                    fill="none"
-                                                    stroke="white"
-                                                    strokeWidth={3}
-                                                />
-                                            )}
+            <div ref={scrollRef} className="pdfjs-canvas-scroll">
+                <div className="pdfjs-page" style={{ width: canvasW, height: canvasH }}>
+                    <canvas ref={canvasRef} className="pdfjs-canvas" />
+                    {native && rendered && (
+                        <svg
+                            className="pdfjs-overlay"
+                            width={canvasW}
+                            height={canvasH}
+                            viewBox={`0 0 ${canvasW} ${canvasH}`}
+                            onClick={handleSvgClick}
+                        >
+                            {marks.map((mark) => {
+                                const screenX = mark.x * scaleX
+                                const screenY = mark.y * scaleY
+                                const isSelected = mark.id === selectedId
+                                const dim = selectedId !== null && !isSelected
+                                const isDragging = draggingMarkId === mark.id
+                                return (
+                                    <g
+                                        key={mark.id}
+                                        className={`pdfjs-mark${isDragging ? " dragging" : ""}`}
+                                        opacity={dim ? 0.35 : 1}
+                                        onPointerDown={(e) => handleMarkPointerDown(e, mark.id)}
+                                        onPointerMove={handleMarkPointerMove}
+                                        onPointerUp={handleMarkPointerUp}
+                                        onPointerCancel={handleMarkPointerUp}
+                                        onClick={(e) => e.stopPropagation()}
+                                    >
+                                        {isSelected && (
                                             <circle
                                                 cx={screenX}
                                                 cy={screenY}
-                                                r={8}
-                                                fill={mark.color}
-                                                stroke="#111"
-                                                strokeWidth={1}
-                                            />
-                                            <text
-                                                x={screenX + 12}
-                                                y={screenY + 5}
-                                                fontSize={14}
-                                                fill="black"
+                                                r={12}
+                                                fill="none"
                                                 stroke="white"
                                                 strokeWidth={3}
-                                                paintOrder="stroke"
-                                            >
-                                                {mark.label}
-                                            </text>
-                                        </g>
-                                    )
-                                })}
-                            </svg>
-                        )}
-                        {selectedMark && (
-                            <MarkInfoPanel
-                                mark={selectedMark}
-                                screenX={selectedMark.x * scaleX}
-                                screenY={selectedMark.y * scaleY}
-                                onClose={() => selectMark(null)}
-                            />
-                        )}
-                    </div>
+                                            />
+                                        )}
+                                        <circle
+                                            cx={screenX}
+                                            cy={screenY}
+                                            r={8}
+                                            fill={mark.color}
+                                            stroke="#111"
+                                            strokeWidth={1}
+                                        />
+                                        <text
+                                            x={screenX + 12}
+                                            y={screenY + 5}
+                                            fontSize={14}
+                                            fill="black"
+                                            stroke="white"
+                                            strokeWidth={3}
+                                            paintOrder="stroke"
+                                        >
+                                            {mark.label}
+                                        </text>
+                                    </g>
+                                )
+                            })}
+                        </svg>
+                    )}
+                    {selectedMark && (
+                        <MarkInfoPanel
+                            mark={selectedMark}
+                            screenX={selectedMark.x * scaleX}
+                            screenY={selectedMark.y * scaleY}
+                            onClose={() => selectMark(null)}
+                        />
+                    )}
                 </div>
             </div>
 
