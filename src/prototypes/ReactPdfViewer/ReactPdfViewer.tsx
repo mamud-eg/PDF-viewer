@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { Worker, Viewer } from "@react-pdf-viewer/core"
 import type { Plugin, PluginRenderPageLayer, DocumentLoadEvent } from "@react-pdf-viewer/core"
 import { defaultLayoutPlugin } from "@react-pdf-viewer/default-layout"
@@ -65,6 +65,7 @@ function MarkLayer({
     }
 
     function handleMarkPointerDown(e: React.PointerEvent<SVGGElement>, id: string) {
+        if (e.button !== 0) return
         e.stopPropagation()
         const target = e.currentTarget
         target.setPointerCapture(e.pointerId)
@@ -104,6 +105,7 @@ function MarkLayer({
     }
 
     function handleSvgPointerUp(e: React.PointerEvent<SVGSVGElement>) {
+        if (e.button !== 0) return
         const didDragMark = draggingMarkId !== null
         if (selectedId !== null) {
             selectMark(null)
@@ -116,6 +118,7 @@ function MarkLayer({
     }
 
     function handleSvgClick(e: React.MouseEvent<SVGSVGElement>) {
+        if (e.button !== 0) return
         const didDragMark = draggingMarkId !== null
         if (selectedId !== null) {
             selectMark(null)
@@ -214,9 +217,65 @@ function MarkLayer({
 
 export function ReactPdfViewer({ pdfUrl }: Props) {
     const defaultLayout = defaultLayoutPlugin()
+    const wrapperRef = useRef<HTMLDivElement | null>(null)
     const [native, setNative] = useState<{ width: number; height: number } | null>(null)
     const { marks, selectedId, addMark, moveMark, selectMark, toggleSelectMark } =
         useMarks("reactpdf-marks")
+
+    // Right-click drag = pan. The library renders its own scroll container
+    // (`.rpv-core__inner-pages`); we adjust its scrollLeft/scrollTop directly.
+    useEffect(() => {
+        const wrapper = wrapperRef.current
+        if (!wrapper) return
+
+        let pan: {
+            container: HTMLElement
+            startX: number
+            startY: number
+            scrollLeft: number
+            scrollTop: number
+        } | null = null
+
+        function onMouseDown(e: MouseEvent) {
+            if (e.button !== 2) return
+            const container = wrapper!.querySelector<HTMLElement>(".rpv-core__inner-pages")
+            if (!container) return
+            e.preventDefault()
+            pan = {
+                container,
+                startX: e.clientX,
+                startY: e.clientY,
+                scrollLeft: container.scrollLeft,
+                scrollTop: container.scrollTop,
+            }
+            wrapper!.classList.add("panning")
+        }
+        function onMouseMove(e: MouseEvent) {
+            if (!pan) return
+            e.preventDefault()
+            pan.container.scrollLeft = pan.scrollLeft - (e.clientX - pan.startX)
+            pan.container.scrollTop = pan.scrollTop - (e.clientY - pan.startY)
+        }
+        function onMouseUp(e: MouseEvent) {
+            if (!pan || e.button !== 2) return
+            pan = null
+            wrapper!.classList.remove("panning")
+        }
+        function onContextMenu(e: MouseEvent) {
+            e.preventDefault()
+        }
+
+        wrapper.addEventListener("mousedown", onMouseDown)
+        wrapper.addEventListener("contextmenu", onContextMenu)
+        window.addEventListener("mousemove", onMouseMove)
+        window.addEventListener("mouseup", onMouseUp)
+        return () => {
+            wrapper.removeEventListener("mousedown", onMouseDown)
+            wrapper.removeEventListener("contextmenu", onContextMenu)
+            window.removeEventListener("mousemove", onMouseMove)
+            window.removeEventListener("mouseup", onMouseUp)
+        }
+    }, [])
 
     const markPlugin: Plugin = useMemo(
         () => ({
@@ -247,7 +306,7 @@ export function ReactPdfViewer({ pdfUrl }: Props) {
     }
 
     return (
-        <div className="reactpdf-wrapper">
+        <div ref={wrapperRef} className="reactpdf-wrapper">
             <Worker workerUrl={pdfWorkerUrl}>
                 <Viewer
                     fileUrl={pdfUrl}

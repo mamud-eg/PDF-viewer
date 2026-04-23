@@ -8,6 +8,11 @@
     height: 100%;
 }
 
+.reactpdf-wrapper.panning,
+.reactpdf-wrapper.panning .rpv-core__inner-pages {
+    cursor: grabbing !important;
+}
+
 .reactpdf-overlay {
     overflow: visible;
     pointer-events: all;
