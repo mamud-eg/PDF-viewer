@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import { Worker, Viewer } from "@react-pdf-viewer/core"
-import type { Plugin, PluginRenderPageLayer, DocumentLoadEvent } from "@react-pdf-viewer/core"
+import type { Plugin, PluginRenderPageLayer } from "@react-pdf-viewer/core"
 import { defaultLayoutPlugin } from "@react-pdf-viewer/default-layout"
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.js?url"
 import type { RegistrationMark } from "../../types"
@@ -16,11 +16,13 @@ interface Props {
 }
 
 const DRAG_THRESHOLD = 3
+const MIN_SCALE = 0.25
+const MAX_SCALE = 16
 
 interface MarkLayerProps {
     width: number
     height: number
-    native: { width: number; height: number }
+    scale: number
     marks: RegistrationMark[]
     selectedId: string | null
     addMark: (x: number, y: number) => void
@@ -32,7 +34,7 @@ interface MarkLayerProps {
 function MarkLayer({
     width,
     height,
-    native,
+    scale,
     marks,
     selectedId,
     addMark,
@@ -48,8 +50,11 @@ function MarkLayer({
     } | null>(null)
     const [draggingMarkId, setDraggingMarkId] = useState<string | null>(null)
 
-    const scaleX = width / native.width
-    const scaleY = height / native.height
+    // Use the plugin-provided `scale` directly so SVG marks track the rendered
+    // page exactly at every zoom level — width/height ratio could drift due to
+    // rounding in the library's intermediate layout.
+    const scaleX = scale
+    const scaleY = scale
 
     function nativeFromEvent(e: React.PointerEvent<SVGElement> | React.MouseEvent<SVGElement>) {
         const svg = e.currentTarget.ownerSVGElement ?? (e.currentTarget as SVGSVGElement)
@@ -59,8 +64,8 @@ function MarkLayer({
         return {
             offsetX: ox,
             offsetY: oy,
-            nativeX: (ox / width) * native.width,
-            nativeY: (oy / height) * native.height,
+            nativeX: ox / scale,
+            nativeY: oy / scale,
         }
     }
 
@@ -216,11 +221,25 @@ function MarkLayer({
 }
 
 export function ReactPdfViewer({ pdfUrl }: Props) {
-    const defaultLayout = defaultLayoutPlugin()
+    const defaultLayout = useMemo(() => defaultLayoutPlugin(), [])
     const wrapperRef = useRef<HTMLDivElement | null>(null)
-    const [native, setNative] = useState<{ width: number; height: number } | null>(null)
     const { marks, selectedId, addMark, moveMark, selectMark, toggleSelectMark } =
         useMarks("reactpdf-marks")
+
+    // Tracked via Viewer's onZoom callback so cursor-anchored zoom knows the
+    // scale before each wheel event. Initialised to match `defaultScale={1}`.
+    const currentScaleRef = useRef(1)
+    // Anchor data captured on Ctrl+wheel and consumed inside onZoom (after one
+    // rAF, to let the library finish relayouting pages at the new scale).
+    const pendingAnchorRef = useRef<{
+        oldScale: number
+        newScale: number
+        cursorX: number
+        cursorY: number
+        scrollLeft: number
+        scrollTop: number
+        scrollEl: HTMLElement
+    } | null>(null)
 
     // Right-click drag = pan. The library renders its own scroll container
     // (`.rpv-core__inner-pages`); we adjust its scrollLeft/scrollTop directly.
@@ -277,15 +296,66 @@ export function ReactPdfViewer({ pdfUrl }: Props) {
         }
     }, [])
 
+    // Ctrl/Cmd + wheel = cursor-anchored zoom. Plain wheel = library-native scroll.
+    // The library renders its own scroll container (`.rpv-core__inner-pages`);
+    // we call zoomTo() on its zoom plugin and adjust scrollLeft/scrollTop in
+    // onZoom once the new layout has been committed.
+    useEffect(() => {
+        const wrapper = wrapperRef.current
+        if (!wrapper) return
+
+        function onWheel(e: WheelEvent) {
+            if (!e.ctrlKey && !e.metaKey) return
+            const scrollEl = wrapper!.querySelector<HTMLElement>(".rpv-core__inner-pages")
+            if (!scrollEl) return
+            e.preventDefault()
+            const rect = scrollEl.getBoundingClientRect()
+            const cursorX = e.clientX - rect.left
+            const cursorY = e.clientY - rect.top
+            const oldScale = currentScaleRef.current
+            const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1
+            const newScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, oldScale * factor))
+            if (newScale === oldScale) return
+            pendingAnchorRef.current = {
+                oldScale,
+                newScale,
+                cursorX,
+                cursorY,
+                scrollLeft: scrollEl.scrollLeft,
+                scrollTop: scrollEl.scrollTop,
+                scrollEl,
+            }
+            defaultLayout.toolbarPluginInstance.zoomPluginInstance.zoomTo(newScale)
+        }
+
+        wrapper.addEventListener("wheel", onWheel, { passive: false })
+        return () => wrapper.removeEventListener("wheel", onWheel)
+    }, [defaultLayout])
+
+    function handleZoom(e: { scale: number }) {
+        currentScaleRef.current = e.scale
+        const a = pendingAnchorRef.current
+        if (!a) return
+        // Ignore stale callbacks from toolbar / fit-to-page zooms — only fix
+        // the scroll position if this onZoom corresponds to our pending wheel.
+        if (Math.abs(e.scale - a.newScale) > 1e-3) return
+        pendingAnchorRef.current = null
+        requestAnimationFrame(() => {
+            const factor = e.scale / a.oldScale
+            a.scrollEl.scrollLeft = (a.cursorX + a.scrollLeft) * factor - a.cursorX
+            a.scrollEl.scrollTop = (a.cursorY + a.scrollTop) * factor - a.cursorY
+        })
+    }
+
     const markPlugin: Plugin = useMemo(
         () => ({
             renderPageLayer: (props: PluginRenderPageLayer) => {
-                if (props.pageIndex !== 0 || !native) return <></>
+                if (props.pageIndex !== 0) return <></>
                 return (
                     <MarkLayer
                         width={props.width}
                         height={props.height}
-                        native={native}
+                        scale={props.scale}
                         marks={marks}
                         selectedId={selectedId}
                         addMark={addMark}
@@ -296,14 +366,8 @@ export function ReactPdfViewer({ pdfUrl }: Props) {
                 )
             },
         }),
-        [native, marks, selectedId, addMark, moveMark, selectMark, toggleSelectMark],
+        [marks, selectedId, addMark, moveMark, selectMark, toggleSelectMark],
     )
-
-    async function handleDocumentLoad(e: DocumentLoadEvent) {
-        const page = await e.doc.getPage(1)
-        const viewport = page.getViewport({ scale: 1 })
-        setNative({ width: viewport.width, height: viewport.height })
-    }
 
     return (
         <div ref={wrapperRef} className="reactpdf-wrapper">
@@ -311,7 +375,8 @@ export function ReactPdfViewer({ pdfUrl }: Props) {
                 <Viewer
                     fileUrl={pdfUrl}
                     plugins={[defaultLayout, markPlugin]}
-                    onDocumentLoad={handleDocumentLoad}
+                    defaultScale={1}
+                    onZoom={handleZoom}
                 />
             </Worker>
         </div>

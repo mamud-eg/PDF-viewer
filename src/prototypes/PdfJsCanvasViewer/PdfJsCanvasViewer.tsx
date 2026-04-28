@@ -1,9 +1,10 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
 import * as pdfjsLib from "pdfjs-dist"
-import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from "pdfjs-dist"
+import type { PDFDocumentProxy, PDFPageProxy } from "pdfjs-dist"
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.js?url"
 import { useMarks } from "../../useMarks"
 import { MarkInfoPanel } from "../../MarkInfoPanel"
+import { TileRenderer } from "./tileRenderer"
 import "./PdfJsCanvasViewer.css"
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl
@@ -13,20 +14,20 @@ interface Props {
 }
 
 const MIN_SCALE = 0.5
-const MAX_SCALE = 5
+const MAX_SCALE = 16
 const DRAG_THRESHOLD = 3
-// Must match the `margin` on `.pdfjs-page` in PdfJsCanvasViewer.css — used in zoom-anchor math.
+// Must match the `margin` on `.pdfjs-page` in PdfJsCanvasViewer.css — used in zoom-anchor math
+// and in the page-relative scroll offset passed to the tile renderer.
 const PAGE_MARGIN = 20
 
 export function PdfJsCanvasViewer({ pdfUrl }: Props) {
-    const canvasRef = useRef<HTMLCanvasElement | null>(null)
+    const tileLayerRef = useRef<HTMLDivElement | null>(null)
     const scrollRef = useRef<HTMLDivElement | null>(null)
     const pageRef = useRef<PDFPageProxy | null>(null)
-    const renderTaskRef = useRef<RenderTask | null>(null)
+    const tileRendererRef = useRef<TileRenderer | null>(null)
 
     const [native, setNative] = useState<{ width: number; height: number } | null>(null)
     const [scale, setScale] = useState(1.5)
-    const [rendered, setRendered] = useState<{ width: number; height: number } | null>(null)
     const [error, setError] = useState<string | null>(null)
 
     const { marks, selectedId, addMark, moveMark, selectMark, toggleSelectMark } =
@@ -60,50 +61,47 @@ export function PdfJsCanvasViewer({ pdfUrl }: Props) {
 
         return () => {
             cancelled = true
-            renderTaskRef.current?.cancel()
-            renderTaskRef.current = null
             pageRef.current = null
             doc?.destroy()
         }
     }, [pdfUrl])
 
-    // Re-render canvas whenever scale changes
+    // Init tile renderer once the tile-layer element exists.
     useEffect(() => {
-        const page = pageRef.current
-        const canvas = canvasRef.current
-        if (!page || !canvas) return
-
-        let cancelled = false
-        const viewport = page.getViewport({ scale })
-        const ctx = canvas.getContext("2d")
-        if (!ctx) return
-
-        canvas.width = Math.floor(viewport.width)
-        canvas.height = Math.floor(viewport.height)
-
-        renderTaskRef.current?.cancel()
-        const task = page.render({ canvasContext: ctx, viewport })
-        renderTaskRef.current = task
-
-        task.promise
-            .then(() => {
-                if (cancelled) return
-                setRendered({ width: canvas.width, height: canvas.height })
-            })
-            .catch((e: unknown) => {
-                const name = (e as { name?: string })?.name
-                if (name === "RenderingCancelledException") return
-                if (!cancelled) setError((e as Error).message)
-            })
-
+        const layer = tileLayerRef.current
+        if (!layer) return
+        const tr = new TileRenderer(layer)
+        tileRendererRef.current = tr
         return () => {
-            cancelled = true
-            task.cancel()
+            tr.destroy()
+            if (tileRendererRef.current === tr) tileRendererRef.current = null
         }
-    }, [scale, native])
+    }, [])
 
-    // Zoom-anchor: captured on ctrl+wheel; applied after the canvas re-renders at the new scale
-    // so the PDF point under the cursor stays put.
+    const canvasW = native ? Math.floor(native.width * scale) : 0
+    const canvasH = native ? Math.floor(native.height * scale) : 0
+    const scaleX = native && canvasW ? canvasW / native.width : 1
+    const scaleY = native && canvasH ? canvasH / native.height : 1
+
+    const updateTiles = useCallback(() => {
+        const tr = tileRendererRef.current
+        const scroll = scrollRef.current
+        if (!tr || !scroll || !native) return
+        tr.update({
+            scrollLeft: scroll.scrollLeft,
+            scrollTop: scroll.scrollTop,
+            viewportWidth: scroll.clientWidth,
+            viewportHeight: scroll.clientHeight,
+            pageWidth: canvasW,
+            pageHeight: canvasH,
+            offsetX: PAGE_MARGIN,
+            offsetY: PAGE_MARGIN,
+        })
+    }, [native, canvasW, canvasH])
+
+    // Zoom-anchor: captured on ctrl+wheel; applied after the page wrapper resizes at the new scale
+    // so the PDF point under the cursor stays put. This must run before the tile-update effect so
+    // the tile range is computed against the post-anchor scroll position.
     const zoomAnchorRef = useRef<{
         oldScale: number
         cursorX: number
@@ -115,14 +113,34 @@ export function PdfJsCanvasViewer({ pdfUrl }: Props) {
     useLayoutEffect(() => {
         const anchor = zoomAnchorRef.current
         const el = scrollRef.current
-        if (!anchor || !el || !rendered) return
+        if (!anchor || !el || !native) return
         const factor = scale / anchor.oldScale
         el.scrollLeft =
             (anchor.cursorX + anchor.scrollLeft - PAGE_MARGIN) * factor + PAGE_MARGIN - anchor.cursorX
         el.scrollTop =
             (anchor.cursorY + anchor.scrollTop - PAGE_MARGIN) * factor + PAGE_MARGIN - anchor.cursorY
         zoomAnchorRef.current = null
-    }, [rendered, scale])
+    }, [scale, native])
+
+    // On scale or page change: bind page, set new zoom (clears stale tiles + cancels in-flight),
+    // then render tiles for the current visible range.
+    useEffect(() => {
+        const tr = tileRendererRef.current
+        const page = pageRef.current
+        if (!tr || !page || !native) return
+        tr.setPage(page)
+        tr.setZoom(scale)
+        updateTiles()
+    }, [scale, native, updateTiles])
+
+    // Render new tiles as the user scrolls (cached tiles within the current zoom are reused).
+    useEffect(() => {
+        const scroll = scrollRef.current
+        if (!scroll) return
+        const onScroll = () => updateTiles()
+        scroll.addEventListener("scroll", onScroll, { passive: true })
+        return () => scroll.removeEventListener("scroll", onScroll)
+    }, [updateTiles])
 
     // Ctrl/Cmd + wheel = zoom (anchored at cursor). Plain wheel = browser-native scroll.
     useEffect(() => {
@@ -198,11 +216,6 @@ export function PdfJsCanvasViewer({ pdfUrl }: Props) {
             window.removeEventListener("mouseup", onMouseUp)
         }
     }, [])
-
-    const canvasW = rendered?.width ?? 0
-    const canvasH = rendered?.height ?? 0
-    const scaleX = native && canvasW ? canvasW / native.width : 1
-    const scaleY = native && canvasH ? canvasH / native.height : 1
 
     // Mark drag state (left-click only; right-click is reserved for panning)
     const markDragRef = useRef<{
@@ -291,8 +304,8 @@ export function PdfJsCanvasViewer({ pdfUrl }: Props) {
 
             <div ref={scrollRef} className="pdfjs-canvas-scroll">
                 <div className="pdfjs-page" style={{ width: canvasW, height: canvasH }}>
-                    <canvas ref={canvasRef} className="pdfjs-canvas" />
-                    {native && rendered && (
+                    <div ref={tileLayerRef} className="pdfjs-tile-layer" />
+                    {native && (
                         <svg
                             className="pdfjs-overlay"
                             width={canvasW}
