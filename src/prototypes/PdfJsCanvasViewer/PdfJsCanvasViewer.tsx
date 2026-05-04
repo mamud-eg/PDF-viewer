@@ -28,6 +28,10 @@ export function PdfJsCanvasViewer({ pdfUrl }: Props) {
 
     const [native, setNative] = useState<{ width: number; height: number } | null>(null)
     const [scale, setScale] = useState(1.5)
+    // The zoom level the rendered tiles are pinned to. Lags behind `scale` during rapid zoom:
+    // we CSS-scale the existing tiles in the meantime and only re-tile after the user pauses.
+    // This keeps PDF.js from being asked to render new tiles on every wheel tick.
+    const [committedScale, setCommittedScale] = useState(1.5)
     const [error, setError] = useState<string | null>(null)
 
     const { marks, selectedId, addMark, moveMark, selectMark, toggleSelectMark } =
@@ -80,6 +84,8 @@ export function PdfJsCanvasViewer({ pdfUrl }: Props) {
 
     const canvasW = native ? Math.floor(native.width * scale) : 0
     const canvasH = native ? Math.floor(native.height * scale) : 0
+    const tileW = native ? Math.floor(native.width * committedScale) : 0
+    const tileH = native ? Math.floor(native.height * committedScale) : 0
     const scaleX = native && canvasW ? canvasW / native.width : 1
     const scaleY = native && canvasH ? canvasH / native.height : 1
 
@@ -87,17 +93,20 @@ export function PdfJsCanvasViewer({ pdfUrl }: Props) {
         const tr = tileRendererRef.current
         const scroll = scrollRef.current
         if (!tr || !scroll || !native) return
+        // While the visible scale doesn't match the committed scale we're CSS-scaling existing
+        // tiles; don't compute a new visible range against mismatched coordinate spaces.
+        if (scale !== committedScale) return
         tr.update({
             scrollLeft: scroll.scrollLeft,
             scrollTop: scroll.scrollTop,
             viewportWidth: scroll.clientWidth,
             viewportHeight: scroll.clientHeight,
-            pageWidth: canvasW,
-            pageHeight: canvasH,
+            pageWidth: tileW,
+            pageHeight: tileH,
             offsetX: PAGE_MARGIN,
             offsetY: PAGE_MARGIN,
         })
-    }, [native, canvasW, canvasH])
+    }, [native, scale, committedScale, tileW, tileH])
 
     // Zoom-anchor: captured on ctrl+wheel; applied after the page wrapper resizes at the new scale
     // so the PDF point under the cursor stays put. This must run before the tile-update effect so
@@ -122,16 +131,26 @@ export function PdfJsCanvasViewer({ pdfUrl }: Props) {
         zoomAnchorRef.current = null
     }, [scale, native])
 
-    // On scale or page change: bind page, set new zoom (clears stale tiles + cancels in-flight),
-    // then render tiles for the current visible range.
+    // Debounce: bump committedScale once `scale` has stopped changing for a beat.
+    // Each new scale resets the timer so the user can keep zooming without paying re-tile cost.
     useEffect(() => {
+        if (scale === committedScale) return
+        const id = window.setTimeout(() => setCommittedScale(scale), 120)
+        return () => clearTimeout(id)
+    }, [scale, committedScale])
+
+    // On committedScale or page change: bind page, set new zoom (clears stale tiles + cancels
+    // in-flight), then render tiles for the current visible range. useLayoutEffect so the clear
+    // happens in the same frame the tile-layer dimensions snap back, avoiding a one-frame paint
+    // of old tiles at wrong positions.
+    useLayoutEffect(() => {
         const tr = tileRendererRef.current
         const page = pageRef.current
         if (!tr || !page || !native) return
         tr.setPage(page)
-        tr.setZoom(scale)
+        tr.setZoom(committedScale)
         updateTiles()
-    }, [scale, native, updateTiles])
+    }, [committedScale, native, updateTiles])
 
     // Render new tiles as the user scrolls (cached tiles within the current zoom are reused).
     useEffect(() => {
@@ -304,7 +323,19 @@ export function PdfJsCanvasViewer({ pdfUrl }: Props) {
 
             <div ref={scrollRef} className="pdfjs-canvas-scroll">
                 <div className="pdfjs-page" style={{ width: canvasW, height: canvasH }}>
-                    <div ref={tileLayerRef} className="pdfjs-tile-layer" />
+                    <div
+                        ref={tileLayerRef}
+                        className="pdfjs-tile-layer"
+                        style={{
+                            width: tileW,
+                            height: tileH,
+                            transform:
+                                scale === committedScale
+                                    ? undefined
+                                    : `scale(${scale / committedScale})`,
+                            transformOrigin: "0 0",
+                        }}
+                    />
                     {native && (
                         <svg
                             className="pdfjs-overlay"

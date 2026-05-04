@@ -19,31 +19,6 @@
     font-size: 14px;
 }
 
-.tabs {
-    display: flex;
-    gap: 8px;
-    border-bottom: 1px solid var(--border);
-}
-
-.tab {
-    background: transparent;
-    border: 1px solid var(--border);
-    border-bottom: none;
-    padding: 8px 14px;
-    font: inherit;
-    font-size: 14px;
-    cursor: pointer;
-    color: var(--text);
-    border-top-left-radius: 6px;
-    border-top-right-radius: 6px;
-}
-
-.tab.active {
-    background: var(--accent-bg);
-    color: var(--text-h);
-    border-color: var(--accent-border);
-}
-
 .viewer-container {
     flex: 1;
     min-height: 600px;
