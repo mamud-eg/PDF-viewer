@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState } from "react"
 import type { RegistrationMark } from "./types"
-import { MOCK_MARKS } from "./mockMarks"
 import { newId, nextColor, nextLabel } from "./markUtils"
 
 function loadMarks(storageKey: string): RegistrationMark[] {
@@ -13,7 +12,7 @@ function loadMarks(storageKey: string): RegistrationMark[] {
     } catch {
         // ignore corrupt storage
     }
-    return MOCK_MARKS
+    return []
 }
 
 export function useMarks(storageKey: string) {
@@ -43,5 +42,10 @@ export function useMarks(storageKey: string) {
         setSelectedId((prev) => (prev === id ? null : id))
     }, [])
 
-    return { marks, selectedId, addMark, moveMark, selectMark, toggleSelectMark }
+    const clearMarks = useCallback(() => {
+        setMarks([])
+        setSelectedId(null)
+    }, [])
+
+    return { marks, selectedId, addMark, moveMark, selectMark, toggleSelectMark, clearMarks }
 }

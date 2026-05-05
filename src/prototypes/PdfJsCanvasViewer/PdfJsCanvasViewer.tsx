@@ -34,7 +34,7 @@ export function PdfJsCanvasViewer({ pdfUrl }: Props) {
     const [committedScale, setCommittedScale] = useState(1.5)
     const [error, setError] = useState<string | null>(null)
 
-    const { marks, selectedId, addMark, moveMark, selectMark, toggleSelectMark } =
+    const { marks, selectedId, addMark, moveMark, selectMark, toggleSelectMark, clearMarks } =
         useMarks("pdfjs-marks")
 
     // Load PDF once
@@ -316,6 +316,7 @@ export function PdfJsCanvasViewer({ pdfUrl }: Props) {
                 <span>{Math.round(scale * 100)}%</span>
                 <button onClick={() => setScale((s) => Math.min(MAX_SCALE, s * 1.25))}>+</button>
                 <button onClick={() => setScale(1.5)}>Reset</button>
+                <button onClick={clearMarks} disabled={marks.length === 0}>Clear marks</button>
                 <span className="hint">
                     Left-click = place / select · drag mark = move · right-click drag = pan · ctrl+scroll = zoom
                 </span>
