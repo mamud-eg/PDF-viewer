@@ -32,6 +32,20 @@
     background: #444;
 }
 
+.pdfjs-toolbar button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.pdfjs-toolbar .pdfjs-btn-danger {
+    border-color: #7a2e2e;
+}
+
+.pdfjs-toolbar .pdfjs-btn-danger:hover:not(:disabled) {
+    background: #8b1a1a;
+    border-color: #a33;
+}
+
 .pdfjs-toolbar .hint {
     margin-left: auto;
     opacity: 0.6;
