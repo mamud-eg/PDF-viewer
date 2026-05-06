@@ -26,8 +26,6 @@ export class TileRenderer {
     private currentZoom = 0
     private page: PDFPageProxy | null = null
     private container: HTMLElement
-    private activeCount = 0
-    private idleCb: (() => void) | null = null
 
     constructor(container: HTMLElement) {
         this.container = container
@@ -43,17 +41,6 @@ export class TileRenderer {
         if (zoom === this.currentZoom) return
         this.currentZoom = zoom
         this.clearAll()
-    }
-
-    // Fires once the in-flight render task count drops back to 0. Used by the viewer to know
-    // exactly when fresh tiles are ready so it can drop the CSS-scaled snapshot — no timer
-    // fudge, no lingering blurry frame.
-    setOnIdle(cb: (() => void) | null) {
-        this.idleCb = cb
-    }
-
-    isIdle() {
-        return this.activeCount === 0
     }
 
     update(opts: UpdateOpts) {
@@ -157,23 +144,12 @@ export class TileRenderer {
         const k = this.key(row, col)
         const entry: TileEntry = { canvas, task }
         this.cache.set(k, entry)
-        this.activeCount++
-
-        const finish = () => {
-            this.activeCount--
-            if (this.activeCount <= 0) {
-                this.activeCount = 0
-                this.idleCb?.()
-            }
-        }
 
         task.promise
             .then(() => {
                 if (this.cache.get(k) === entry) entry.task = null
-                finish()
             })
             .catch((e: unknown) => {
-                finish()
                 const name = (e as { name?: string })?.name
                 if (name === "RenderingCancelledException") return
                 // Per-tile errors are tolerable: drop the tile so a future update can retry.

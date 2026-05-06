@@ -19,55 +19,6 @@ const DRAG_THRESHOLD = 3
 // Must match the `margin` on `.pdfjs-page` in PdfJsCanvasViewer.css — used in zoom-anchor math
 // and in the page-relative scroll offset passed to the tile renderer.
 const PAGE_MARGIN = 20
-// Safety net: drop the snapshot if onIdle hasn't fired by then (e.g., render error path).
-// Picked well above a typical re-tile budget so it never fights the real signal.
-const SNAPSHOT_MAX_LIFETIME_MS = 4000
-
-// Clone the rendered tiles into a detached container at their current pixel positions. The
-// clones aren't auto-updated; they're a freeze-frame of the page at the old committed scale,
-// shown CSS-scaled while the renderer rebuilds at the new scale. Pulled the moment the
-// renderer reports idle, so the user never sees a blurry CSS-upscaled image after the sharp
-// tiles are ready.
-function cloneTilesIntoStaleLayer(
-    tileLayer: HTMLDivElement,
-    oldTileW: number,
-    oldTileH: number,
-): HTMLDivElement | null {
-    const tiles = tileLayer.querySelectorAll<HTMLCanvasElement>("canvas.pdfjs-tile")
-    if (tiles.length === 0) return null
-
-    const stale = document.createElement("div")
-    stale.style.position = "absolute"
-    stale.style.top = "0"
-    stale.style.left = "0"
-    stale.style.width = `${oldTileW}px`
-    stale.style.height = `${oldTileH}px`
-    stale.style.overflow = "hidden"
-
-    for (const tile of Array.from(tiles)) {
-        const clone = document.createElement("canvas")
-        clone.width = tile.width
-        clone.height = tile.height
-        clone.className = "pdfjs-tile"
-        clone.style.position = "absolute"
-        clone.style.left = tile.style.left
-        clone.style.top = tile.style.top
-        clone.style.width = tile.style.width
-        clone.style.height = tile.style.height
-        const ctx = clone.getContext("2d")
-        if (ctx) {
-            // drawImage copies the bitmap; cloneNode would only copy the canvas attributes.
-            try {
-                ctx.drawImage(tile, 0, 0)
-            } catch {
-                /* tile unreadable — skip, the others still show */
-            }
-        }
-        stale.appendChild(clone)
-    }
-
-    return stale
-}
 
 export function PdfJsCanvasViewer({ pdfUrl }: Props) {
     const tileLayerRef = useRef<HTMLDivElement | null>(null)
@@ -82,17 +33,6 @@ export function PdfJsCanvasViewer({ pdfUrl }: Props) {
     // This keeps PDF.js from being asked to render new tiles on every wheel tick.
     const [committedScale, setCommittedScale] = useState(1.5)
     const [error, setError] = useState<string | null>(null)
-    // Freeze-frame of the prior committed-scale tiles, mounted behind the live tile-layer
-    // while the renderer is producing fresh tiles. Removed the instant the renderer reports
-    // idle — no fade, because once fresh tiles are ready we want the sharp version, not a
-    // half-faded blurry snapshot on top.
-    const [stale, setStale] = useState<{
-        container: HTMLDivElement
-        oldScale: number
-        nonce: number
-    } | null>(null)
-    const prevCommittedRef = useRef(1.5)
-    const safetyTimerRef = useRef<number | null>(null)
 
     const { marks, selectedId, addMark, moveMark, selectMark, toggleSelectMark, clearMarks } =
         useMarks("pdfjs-marks")
@@ -203,59 +143,14 @@ export function PdfJsCanvasViewer({ pdfUrl }: Props) {
     // in-flight), then render tiles for the current visible range. useLayoutEffect so the clear
     // happens in the same frame the tile-layer dimensions snap back, avoiding a one-frame paint
     // of old tiles at wrong positions.
-    //
-    // To avoid the white flash mid-zoom we snapshot the live tiles *before* tr.setZoom clears
-    // them, mount the clones behind the (now-empty) tile-layer CSS-scaled to the new visible
-    // size, and pull the snapshot the instant the renderer reports idle.
     useLayoutEffect(() => {
         const tr = tileRendererRef.current
         const page = pageRef.current
-        const tileLayer = tileLayerRef.current
         if (!tr || !page || !native) return
-
-        const oldCommitted = prevCommittedRef.current
-        prevCommittedRef.current = committedScale
-
-        const dropSnapshot = () => {
-            if (safetyTimerRef.current !== null) {
-                clearTimeout(safetyTimerRef.current)
-                safetyTimerRef.current = null
-            }
-            setStale(null)
-        }
-
-        if (oldCommitted !== committedScale && oldCommitted > 0 && tileLayer) {
-            const oldTileW = Math.floor(native.width * oldCommitted)
-            const oldTileH = Math.floor(native.height * oldCommitted)
-            const staleEl = cloneTilesIntoStaleLayer(tileLayer, oldTileW, oldTileH)
-            if (staleEl) {
-                if (safetyTimerRef.current !== null) clearTimeout(safetyTimerRef.current)
-                setStale({ container: staleEl, oldScale: oldCommitted, nonce: Date.now() })
-                safetyTimerRef.current = window.setTimeout(
-                    dropSnapshot,
-                    SNAPSHOT_MAX_LIFETIME_MS,
-                )
-            }
-        }
-
-        // The callback is overwritten on every commit, so only the most recent transition's
-        // dropSnapshot runs — earlier ones are superseded.
-        tr.setOnIdle(dropSnapshot)
         tr.setPage(page)
         tr.setZoom(committedScale)
         updateTiles()
-        // If the new visible range needed no fresh tiles (e.g., zooming out into already-rendered
-        // territory cached at the new zoom never happens here, but guard anyway), the renderer
-        // is already idle and won't fire onIdle. Drop the snapshot synchronously in that case.
-        if (tr.isIdle()) dropSnapshot()
     }, [committedScale, native, updateTiles])
-
-    useEffect(() => {
-        return () => {
-            if (safetyTimerRef.current !== null) clearTimeout(safetyTimerRef.current)
-            tileRendererRef.current?.setOnIdle(null)
-        }
-    }, [])
 
     // Render new tiles as the user scrolls (cached tiles within the current zoom are reused).
     useEffect(() => {
@@ -429,22 +324,6 @@ export function PdfJsCanvasViewer({ pdfUrl }: Props) {
 
             <div ref={scrollRef} className="pdfjs-canvas-scroll">
                 <div className="pdfjs-page" style={{ width: canvasW, height: canvasH }}>
-                    {stale && native && (
-                        <div
-                            key={stale.nonce}
-                            ref={(el) => {
-                                if (el && !el.contains(stale.container)) {
-                                    el.appendChild(stale.container)
-                                }
-                            }}
-                            className="pdfjs-stale-wrap"
-                            style={{
-                                width: Math.floor(native.width * stale.oldScale),
-                                height: Math.floor(native.height * stale.oldScale),
-                                transform: `scale(${scale / stale.oldScale})`,
-                            }}
-                        />
-                    )}
                     <div
                         ref={tileLayerRef}
                         className="pdfjs-tile-layer"
@@ -528,12 +407,6 @@ export function PdfJsCanvasViewer({ pdfUrl }: Props) {
                 </div>
             </div>
 
-            {stale && (
-                <div className="pdfjs-render-status" role="status" aria-live="polite">
-                    <div className="pdfjs-render-spinner" />
-                    <span>Rendering…</span>
-                </div>
-            )}
             {error && <div className="pdfjs-error">Failed to load PDF: {error}</div>}
             {!native && !error && <div className="pdfjs-loading">Loading PDF…</div>}
         </div>
