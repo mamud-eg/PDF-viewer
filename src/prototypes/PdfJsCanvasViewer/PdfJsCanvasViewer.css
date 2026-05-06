@@ -75,6 +75,20 @@
     top: 0;
     left: 0;
     overflow: hidden;
+    /* Above the stale snapshot so fresh tiles paint over it as they land. */
+    z-index: 1;
+}
+
+/* Freeze-frame of the prior committed scale, shown only while the renderer is producing
+   fresh tiles. No opacity transition: removed the instant onIdle fires so the user never
+   sees a blurry CSS-upscaled image lingering over sharp tiles. */
+.pdfjs-stale-wrap {
+    position: absolute;
+    top: 0;
+    left: 0;
+    transform-origin: 0 0;
+    pointer-events: none;
+    z-index: 0;
 }
 
 .pdfjs-tile {
@@ -111,4 +125,40 @@
 
 .pdfjs-error {
     background: rgba(180, 40, 40, 0.85);
+}
+
+/* Centered re-tile loader. Mounts and unmounts with the snapshot, so it's only on screen
+   while rendering is actually in progress. */
+.pdfjs-render-status {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: rgba(0, 0, 0, 0.72);
+    color: #fff;
+    padding: 10px 18px;
+    border-radius: 999px;
+    font-size: 13px;
+    pointer-events: none;
+    z-index: 3;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+
+.pdfjs-render-spinner {
+    width: 14px;
+    height: 14px;
+    border: 2px solid rgba(255, 255, 255, 0.25);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: pdfjs-spin 0.8s linear infinite;
+    flex-shrink: 0;
+}
+
+@keyframes pdfjs-spin {
+    to {
+        transform: rotate(360deg);
+    }
 }
