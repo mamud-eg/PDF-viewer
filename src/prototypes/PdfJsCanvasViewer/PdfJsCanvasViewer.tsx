@@ -19,6 +19,9 @@ const DRAG_THRESHOLD = 3
 // Must match the `margin` on `.pdfjs-page` in PdfJsCanvasViewer.css — used in zoom-anchor math
 // and in the page-relative scroll offset passed to the tile renderer.
 const PAGE_MARGIN = 20
+// Safety net: drop the wrap if the renderer never reports idle (e.g., render error path).
+// Picked well above a typical re-tile budget so it never fights the real signal.
+const SNAPSHOT_MAX_LIFETIME_MS = 4000
 
 export function PdfJsCanvasViewer({ pdfUrl }: Props) {
     const tileLayerRef = useRef<HTMLDivElement | null>(null)
@@ -33,6 +36,14 @@ export function PdfJsCanvasViewer({ pdfUrl }: Props) {
     // This keeps PDF.js from being asked to render new tiles on every wheel tick.
     const [committedScale, setCommittedScale] = useState(1.5)
     const [error, setError] = useState<string | null>(null)
+    // Stale-wrap state: holds the previously-drawn tile canvases (re-parented out of the live
+    // tile-layer) while fresh tiles render off-DOM into the new tile-layer. Wrap is sized to
+    // the OLD committed scale and CSS-scaled to the current visible scale, so the user sees
+    // the page upscaled instead of white during the render. Removed on tr.onIdle.
+    const staleWrapRef = useRef<HTMLDivElement | null>(null)
+    const staleScaleRef = useRef(0)
+    const prevCommittedRef = useRef(1.5)
+    const safetyTimerRef = useRef<number | null>(null)
 
     const { marks, selectedId, addMark, moveMark, selectMark, toggleSelectMark, clearMarks } =
         useMarks("pdfjs-marks")
@@ -139,18 +150,112 @@ export function PdfJsCanvasViewer({ pdfUrl }: Props) {
         return () => clearTimeout(id)
     }, [scale, committedScale])
 
-    // On committedScale or page change: bind page, set new zoom (clears stale tiles + cancels
-    // in-flight), then render tiles for the current visible range. useLayoutEffect so the clear
-    // happens in the same frame the tile-layer dimensions snap back, avoiding a one-frame paint
-    // of old tiles at wrong positions.
+    // Tear-down: pulls the stale wrap out of the DOM (releasing the re-parented canvases with
+    // it), clears refs and timer. Idempotent.
+    const tearDownStaleWrap = useCallback(() => {
+        const wrap = staleWrapRef.current
+        if (wrap) {
+            wrap.remove()
+            staleWrapRef.current = null
+        }
+        staleScaleRef.current = 0
+        if (safetyTimerRef.current !== null) {
+            clearTimeout(safetyTimerRef.current)
+            safetyTimerRef.current = null
+        }
+    }, [])
+
+    // On committedScale or page change: bind page, set new zoom, render tiles. useLayoutEffect
+    // so the snapshot/clear/queue all happen in the same frame.
+    //
+    // To avoid the white flash mid-zoom we re-parent the existing (drawn) tile canvases into
+    // a stale wrap *before* asking the renderer to forget them. Combined with the renderer's
+    // atomic-swap (tiles only attach when fully drawn), the wrap is guaranteed to hold real
+    // bitmaps, never blanks. The wrap stays visible CSS-scaled to the current visible scale
+    // while fresh tiles render off-DOM. The renderer's onIdle callback drops the wrap the
+    // instant the new render is done.
     useLayoutEffect(() => {
         const tr = tileRendererRef.current
         const page = pageRef.current
-        if (!tr || !page || !native) return
+        const tileLayer = tileLayerRef.current
+        if (!tr || !page || !native || !tileLayer) return
+
+        const oldCommitted = prevCommittedRef.current
+        prevCommittedRef.current = committedScale
+
+        if (oldCommitted !== committedScale && oldCommitted > 0) {
+            if (staleWrapRef.current) {
+                // A wrap from a prior commit is already up. Its tiles are fully rendered;
+                // replacing it with whatever is in tile-layer right now (which may be a partial
+                // mid-render set) would look worse. Keep it; setZoom below discards in-flight
+                // and partial tiles for the previous commit. Just push the safety timer.
+                if (safetyTimerRef.current !== null) clearTimeout(safetyTimerRef.current)
+                safetyTimerRef.current = window.setTimeout(
+                    tearDownStaleWrap,
+                    SNAPSHOT_MAX_LIFETIME_MS,
+                )
+            } else {
+                const liveTiles = tileLayer.querySelectorAll<HTMLCanvasElement>(
+                    "canvas.pdfjs-tile",
+                )
+                const pageWrap = tileLayer.parentElement
+                if (liveTiles.length > 0 && pageWrap) {
+                    const wrap = document.createElement("div")
+                    wrap.className = "pdfjs-stale-wrap"
+                    wrap.style.width = `${Math.floor(native.width * oldCommitted)}px`
+                    wrap.style.height = `${Math.floor(native.height * oldCommitted)}px`
+                    wrap.style.transform = `scale(${scale / oldCommitted})`
+
+                    // Cheap: re-parent existing canvases. No drawImage, no new bitmaps.
+                    for (const tile of Array.from(liveTiles)) {
+                        wrap.appendChild(tile)
+                    }
+
+                    // Behind the live tile-layer (z-index in CSS). Inserted before tile-layer
+                    // so fresh tiles paint over the wrap as they finish rendering.
+                    pageWrap.insertBefore(wrap, tileLayer)
+                    staleWrapRef.current = wrap
+                    staleScaleRef.current = oldCommitted
+
+                    safetyTimerRef.current = window.setTimeout(
+                        tearDownStaleWrap,
+                        SNAPSHOT_MAX_LIFETIME_MS,
+                    )
+
+                    // Cache still references the re-parented canvases. Wipe it (cancels any
+                    // in-flight tasks) without removing the canvases from DOM.
+                    tr.detachCurrentTiles()
+                }
+            }
+        }
+
+        tr.setOnIdle(tearDownStaleWrap)
         tr.setPage(page)
         tr.setZoom(committedScale)
         updateTiles()
-    }, [committedScale, native, updateTiles])
+
+        // Edge case: nothing new to render — fire teardown now instead of waiting on an
+        // onIdle that won't come.
+        if (tr.isIdle() && staleWrapRef.current) {
+            tearDownStaleWrap()
+        }
+    }, [committedScale, native, updateTiles, tearDownStaleWrap, scale])
+
+    // Track scale changes on the live wrap directly (avoids React re-rendering the wrap node
+    // on every wheel tick during further zooming).
+    useLayoutEffect(() => {
+        const wrap = staleWrapRef.current
+        const oldScale = staleScaleRef.current
+        if (!wrap || oldScale === 0) return
+        wrap.style.transform = `scale(${scale / oldScale})`
+    }, [scale])
+
+    useEffect(() => {
+        return () => {
+            if (safetyTimerRef.current !== null) clearTimeout(safetyTimerRef.current)
+            tileRendererRef.current?.setOnIdle(null)
+        }
+    }, [])
 
     // Render new tiles as the user scrolls (cached tiles within the current zoom are reused).
     useEffect(() => {

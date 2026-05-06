@@ -75,6 +75,20 @@
     top: 0;
     left: 0;
     overflow: hidden;
+    /* Above the stale wrap so fresh tiles paint over it as they pop in. */
+    z-index: 1;
+}
+
+/* Holds the previously-drawn tile canvases CSS-scaled to the current visible scale while
+   fresh tiles render off-DOM. Removed instantly on tr.onIdle — no fade. */
+.pdfjs-stale-wrap {
+    position: absolute;
+    top: 0;
+    left: 0;
+    transform-origin: 0 0;
+    pointer-events: none;
+    overflow: hidden;
+    z-index: 0;
 }
 
 .pdfjs-tile {

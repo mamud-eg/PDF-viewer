@@ -26,6 +26,8 @@ export class TileRenderer {
     private currentZoom = 0
     private page: PDFPageProxy | null = null
     private container: HTMLElement
+    private activeCount = 0
+    private idleCb: (() => void) | null = null
 
     constructor(container: HTMLElement) {
         this.container = container
@@ -41,6 +43,27 @@ export class TileRenderer {
         if (zoom === this.currentZoom) return
         this.currentZoom = zoom
         this.clearAll()
+    }
+
+    // Fires once the in-flight render-task count drops to 0 — used by the viewer to drop the
+    // CSS-upscaled wrap the moment fresh tiles are ready, with no fade.
+    setOnIdle(cb: (() => void) | null) {
+        this.idleCb = cb
+    }
+
+    isIdle() {
+        return this.activeCount === 0
+    }
+
+    // Hand the live tile canvases off to the caller without removing them from the DOM. Cancels
+    // in-flight renders and empties the cache; the caller is now responsible for the canvases
+    // (typically re-parents them into a stale wrap so they keep showing while fresh tiles render
+    // off-DOM into a new cache).
+    detachCurrentTiles(): void {
+        for (const entry of this.cache.values()) {
+            entry.task?.cancel()
+        }
+        this.cache.clear()
     }
 
     update(opts: UpdateOpts) {
@@ -129,7 +152,9 @@ export class TileRenderer {
         canvas.style.width = `${tileW}px`
         canvas.style.height = `${tileH}px`
 
-        this.container.appendChild(canvas)
+        // Don't appendChild yet — an in-DOM but un-drawn canvas is transparent, so the white
+        // .pdfjs-page background shows through until pdfjs finishes drawing ("the tile turns
+        // white"). Render off-DOM and attach atomically once the bitmap is ready.
 
         const ctx = canvas.getContext("2d")
         if (!ctx) return
@@ -144,17 +169,30 @@ export class TileRenderer {
         const k = this.key(row, col)
         const entry: TileEntry = { canvas, task }
         this.cache.set(k, entry)
+        this.activeCount++
+
+        const finish = () => {
+            this.activeCount--
+            if (this.activeCount <= 0) {
+                this.activeCount = 0
+                this.idleCb?.()
+            }
+        }
 
         task.promise
             .then(() => {
-                if (this.cache.get(k) === entry) entry.task = null
+                if (this.cache.get(k) === entry) {
+                    this.container.appendChild(canvas)
+                    entry.task = null
+                }
+                finish()
             })
             .catch((e: unknown) => {
+                finish()
                 const name = (e as { name?: string })?.name
                 if (name === "RenderingCancelledException") return
                 // Per-tile errors are tolerable: drop the tile so a future update can retry.
                 if (this.cache.get(k) === entry) {
-                    entry.canvas.remove()
                     this.cache.delete(k)
                 }
             })
