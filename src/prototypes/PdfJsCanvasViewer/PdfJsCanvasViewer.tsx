@@ -36,6 +36,9 @@ export function PdfJsCanvasViewer({ pdfUrl }: Props) {
     // This keeps PDF.js from being asked to render new tiles on every wheel tick.
     const [committedScale, setCommittedScale] = useState(1.5)
     const [error, setError] = useState<string | null>(null)
+    // Drives the centered "Rendering…" pill. True while the stale wrap is up (i.e., while the
+    // CSS-upscaled snapshot is bridging the gap until fresh tiles finish).
+    const [transitioning, setTransitioning] = useState(false)
     // Stale-wrap state: holds the previously-drawn tile canvases (re-parented out of the live
     // tile-layer) while fresh tiles render off-DOM into the new tile-layer. Wrap is sized to
     // the OLD committed scale and CSS-scaled to the current visible scale, so the user sees
@@ -163,6 +166,7 @@ export function PdfJsCanvasViewer({ pdfUrl }: Props) {
             clearTimeout(safetyTimerRef.current)
             safetyTimerRef.current = null
         }
+        setTransitioning(false)
     }, [])
 
     // On committedScale or page change: bind page, set new zoom, render tiles. useLayoutEffect
@@ -216,6 +220,7 @@ export function PdfJsCanvasViewer({ pdfUrl }: Props) {
                     pageWrap.insertBefore(wrap, tileLayer)
                     staleWrapRef.current = wrap
                     staleScaleRef.current = oldCommitted
+                    setTransitioning(true)
 
                     safetyTimerRef.current = window.setTimeout(
                         tearDownStaleWrap,
@@ -512,6 +517,12 @@ export function PdfJsCanvasViewer({ pdfUrl }: Props) {
                 </div>
             </div>
 
+            {transitioning && (
+                <div className="pdfjs-render-status" role="status" aria-live="polite">
+                    <div className="pdfjs-render-spinner" />
+                    <span>Rendering…</span>
+                </div>
+            )}
             {error && <div className="pdfjs-error">Failed to load PDF: {error}</div>}
             {!native && !error && <div className="pdfjs-loading">Loading PDF…</div>}
         </div>
