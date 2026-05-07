@@ -3,7 +3,7 @@ import { PdfJsCanvasViewer } from "./prototypes/PdfJsCanvasViewer/PdfJsCanvasVie
 import "./App.css"
 
 export default function App() {
-    const [pdfUrl, setPdfUrl] = useState("/sample.pdf")
+    const [pdfUrl, setPdfUrl] = useState(`${import.meta.env.BASE_URL}sample.pdf`)
     const [fileName, setFileName] = useState("sample.pdf")
     const fileInputRef = useRef<HTMLInputElement>(null)
     const objectUrlRef = useRef<string | null>(null)
