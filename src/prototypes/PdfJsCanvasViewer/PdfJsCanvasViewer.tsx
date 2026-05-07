@@ -13,7 +13,7 @@ interface Props {
     pdfUrl: string
 }
 
-const MIN_SCALE = 0.5
+const MIN_SCALE = 0.2
 const MAX_SCALE = 16
 const DRAG_THRESHOLD = 3
 // Must match the `margin` on `.pdfjs-page` in PdfJsCanvasViewer.css — used in zoom-anchor math
@@ -30,11 +30,11 @@ export function PdfJsCanvasViewer({ pdfUrl }: Props) {
     const tileRendererRef = useRef<TileRenderer | null>(null)
 
     const [native, setNative] = useState<{ width: number; height: number } | null>(null)
-    const [scale, setScale] = useState(1.5)
+    const [scale, setScale] = useState(1)
     // The zoom level the rendered tiles are pinned to. Lags behind `scale` during rapid zoom:
     // we CSS-scale the existing tiles in the meantime and only re-tile after the user pauses.
     // This keeps PDF.js from being asked to render new tiles on every wheel tick.
-    const [committedScale, setCommittedScale] = useState(1.5)
+    const [committedScale, setCommittedScale] = useState(1)
     const [error, setError] = useState<string | null>(null)
     // Drives the centered "Rendering…" pill. True while the stale wrap is up (i.e., while the
     // CSS-upscaled snapshot is bridging the gap until fresh tiles finish).
@@ -45,7 +45,7 @@ export function PdfJsCanvasViewer({ pdfUrl }: Props) {
     // the page upscaled instead of white during the render. Removed on tr.onIdle.
     const staleWrapRef = useRef<HTMLDivElement | null>(null)
     const staleScaleRef = useRef(0)
-    const prevCommittedRef = useRef(1.5)
+    const prevCommittedRef = useRef(1)
     const safetyTimerRef = useRef<number | null>(null)
 
     const { marks, selectedId, addMark, moveMark, selectMark, toggleSelectMark, clearMarks } =
@@ -425,7 +425,7 @@ export function PdfJsCanvasViewer({ pdfUrl }: Props) {
                 <button onClick={() => setScale((s) => Math.max(MIN_SCALE, s / 1.25))}>−</button>
                 <span>{Math.round(scale * 100)}%</span>
                 <button onClick={() => setScale((s) => Math.min(MAX_SCALE, s * 1.25))}>+</button>
-                <button onClick={() => setScale(1.5)}>Reset</button>
+                <button onClick={() => setScale(1)}>Reset</button>
                 <button className="pdfjs-btn-danger" onClick={clearMarks} disabled={marks.length === 0}>Clear all</button>
                 <span className="hint">
                     Left-click = place / select · drag mark = move · right-click drag = pan · ctrl+scroll = zoom

@@ -57,6 +57,9 @@
     overflow: auto;
     position: relative;
     user-select: none;
+    display: flex;
+    align-items: flex-start;
+    justify-content: flex-start;
 }
 
 .pdfjs-canvas-scroll.panning {
@@ -67,7 +70,8 @@
     position: relative;
     background: #fff;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
-    margin: 20px;
+    margin: 20px auto;
+    flex-shrink: 0;
 }
 
 .pdfjs-tile-layer {
